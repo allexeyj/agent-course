@@ -28,7 +28,7 @@ HF_SPACE_URL    = os.environ.get(
 )
 
 VERBOSE         = True
-TIMEOUT_SEC     = 280
+TIMEOUT_SEC     = 500
 
 # Вопросы которые пропускаем (YouTube заблокирован в Colab).
 # Убери task_id из этого списка когда решишь проблему с cookies.
