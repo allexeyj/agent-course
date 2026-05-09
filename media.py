@@ -1,13 +1,17 @@
 """
 media.py — локальные медиа-инструменты для GAIA агента
-  - Whisper  : аудио → текст
-  - BLIP     : картинка → caption
-  - yt-dlp   : YouTube → аудио / фреймы / оба
+  - Whisper    : аудио → текст
+  - Moondream2 : картинка → ответ на произвольный вопрос (замена BLIP)
+  - YOLOv8     : детекция и подсчёт объектов на фреймах
+  - Stockfish  : анализ шахматных позиций (FEN → лучший ход)
+  - pdfplumber : извлечение текста из PDF (файл или URL)
+  - yt-dlp     : YouTube → аудио / фреймы / оба
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import os
 import subprocess
 import tempfile
@@ -15,16 +19,16 @@ from pathlib import Path
 from typing import Literal
 
 # ──────────────────────────────────────────────
-# Ленивая загрузка моделей (чтобы не грузить при импорте)
+# Ленивая загрузка моделей
 # ──────────────────────────────────────────────
 
 _whisper_model = None
-_blip_processor = None
-_blip_model = None
+_moondream_model = None
+_moondream_tokenizer = None
+_yolo_model = None
 
 
 def _get_whisper(model_size: str = "base"):
-    """Загружает Whisper один раз и кэширует."""
     global _whisper_model
     if _whisper_model is None:
         import whisper
@@ -33,22 +37,42 @@ def _get_whisper(model_size: str = "base"):
     return _whisper_model
 
 
-def _get_blip():
-    """Загружает BLIP один раз и кэширует."""
-    global _blip_processor, _blip_model
-    if _blip_model is None:
-        from transformers import BlipProcessor, BlipForConditionalGeneration
+def _get_moondream():
+    """
+    Загружает Moondream2 (~2GB VRAM).
+    Принимает произвольный вопрос об изображении — намного мощнее BLIP.
+    """
+    global _moondream_model, _moondream_tokenizer
+    if _moondream_model is None:
         import torch
-        print("[media] Загружаю BLIP…")
-        _blip_processor = BlipProcessor.from_pretrained(
-            "Salesforce/blip-image-captioning-base"
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        print("[media] Загружаю Moondream2…")
+        revision = "2025-01-09"
+        _moondream_tokenizer = AutoTokenizer.from_pretrained(
+            "vikhyatk/moondream2", revision=revision
         )
-        _blip_model = BlipForConditionalGeneration.from_pretrained(
-            "Salesforce/blip-image-captioning-base"
+        _moondream_model = AutoModelForCausalLM.from_pretrained(
+            "vikhyatk/moondream2",
+            revision=revision,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
         )
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        _blip_model = _blip_model.to(device)
-    return _blip_processor, _blip_model
+        _moondream_model = _moondream_model.to(device)
+        _moondream_model.eval()
+        print(f"[media] Moondream2 загружен на {device}")
+    return _moondream_model, _moondream_tokenizer
+
+
+def _get_yolo():
+    """Загружает YOLOv8 nano (~6MB). Для детекции и подсчёта объектов."""
+    global _yolo_model
+    if _yolo_model is None:
+        from ultralytics import YOLO
+        print("[media] Загружаю YOLOv8n…")
+        _yolo_model = YOLO("yolov8n.pt")
+    return _yolo_model
 
 
 # ──────────────────────────────────────────────
@@ -61,8 +85,8 @@ def transcribe_audio(audio_path: str, word_timestamps: bool = False) -> dict:
 
     Returns:
         {
-          "text": str,                        # полный текст
-          "segments": [{"start", "end", "text"}, ...]  # по сегментам
+          "text": str,
+          "segments": [{"start", "end", "text"}, ...]
         }
     """
     model = _get_whisper()
@@ -79,51 +103,254 @@ def transcribe_audio(audio_path: str, word_timestamps: bool = False) -> dict:
 
 
 # ──────────────────────────────────────────────
-# BLIP: картинка → caption
+# MOONDREAM2: картинка + вопрос → ответ
 # ──────────────────────────────────────────────
 
-def caption_image(image_path: str) -> str:
+def caption_image(image_path: str, question: str = "Describe this image in detail.") -> str:
     """
-    Генерирует текстовое описание изображения через BLIP.
+    Отвечает на произвольный вопрос об изображении через Moondream2.
     Принимает путь к файлу или URL.
-    """
-    from PIL import Image
-    import torch
-    import requests as req
 
-    processor, model = _get_blip()
-    device = next(model.parameters()).device
+    Args:
+        image_path: путь к файлу или URL
+        question:   что именно спросить об изображении
+    """
+    import requests as req
+    from PIL import Image
+
+    model, tokenizer = _get_moondream()
 
     if image_path.startswith("http"):
         raw = req.get(image_path, timeout=10)
-        import io
         image = Image.open(io.BytesIO(raw.content)).convert("RGB")
     else:
         image = Image.open(image_path).convert("RGB")
 
-    inputs = processor(image, return_tensors="pt").to(device)
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=150)
-    caption = processor.decode(out[0], skip_special_tokens=True)
-    return caption
+    enc = model.encode_image(image)
+    answer = model.answer_question(enc, question, tokenizer)
+    return answer
 
 
-def caption_image_base64(b64_str: str) -> str:
-    """Caption для base64-encoded изображения."""
-    import io
+def caption_image_base64(b64_str: str, question: str = "Describe this image in detail.") -> str:
+    """Отвечает на вопрос для base64-encoded изображения."""
     from PIL import Image
-    import torch
 
-    processor, model = _get_blip()
-    device = next(model.parameters()).device
-
+    model, tokenizer = _get_moondream()
     img_bytes = base64.b64decode(b64_str)
     image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-    inputs = processor(image, return_tensors="pt").to(device)
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=150)
-    return processor.decode(out[0], skip_special_tokens=True)
+    enc = model.encode_image(image)
+    return model.answer_question(enc, question, tokenizer)
+
+
+# ──────────────────────────────────────────────
+# YOLO: подсчёт объектов на фреймах
+# ──────────────────────────────────────────────
+
+# COCO class ids для часто нужных объектов
+COCO_CLASSES = {
+    "bird": 14,
+    "cat": 15,
+    "dog": 16,
+    "person": 0,
+    "car": 2,
+    "airplane": 4,
+    "boat": 8,
+    "horse": 17,
+    "sheep": 18,
+    "cow": 19,
+}
+
+
+def count_objects_in_frames(
+    frame_paths: list[str],
+    object_name: str = "bird",
+) -> dict:
+    """
+    Считает объекты заданного класса на каждом фрейме.
+    Возвращает максимум и детали по каждому фрейму.
+
+    Args:
+        frame_paths: список путей к фреймам
+        object_name: название объекта (bird, person, car, etc.)
+
+    Returns:
+        {
+          "max_count": int,
+          "max_at_frame": str,       # путь к фрейму с максимумом
+          "per_frame": [{"path", "count", "timestamp_sec"}, ...]
+        }
+    """
+    model = _get_yolo()
+
+    class_id = COCO_CLASSES.get(object_name.lower())
+    if class_id is None:
+        # если класс не в словаре — ищем по имени в именах COCO
+        class_id = None  # YOLO сам разберётся через names
+
+    per_frame = []
+    max_count = 0
+    max_frame = ""
+
+    for path in frame_paths:
+        if class_id is not None:
+            results = model(path, classes=[class_id], verbose=False)
+        else:
+            # запустим всё и отфильтруем по имени
+            results = model(path, verbose=False)
+            results[0].boxes = [
+                b for b in results[0].boxes
+                if model.names[int(b.cls)].lower() == object_name.lower()
+            ]
+
+        count = len(results[0].boxes)
+        per_frame.append({"path": path, "count": count})
+
+        if count > max_count:
+            max_count = count
+            max_frame = path
+
+    return {
+        "max_count": max_count,
+        "max_at_frame": max_frame,
+        "per_frame": per_frame,
+    }
+
+
+# ──────────────────────────────────────────────
+# CHESS: изображение → FEN → лучший ход
+# ──────────────────────────────────────────────
+
+def extract_fen_from_image(image_path: str) -> str:
+    """
+    Извлекает FEN нотацию шахматной позиции из изображения
+    через Moondream2.
+    """
+    prompt = (
+        "This is a chess board. "
+        "Please read the position carefully and provide the FEN notation "
+        "of this position. Output ONLY the FEN string, nothing else."
+    )
+    fen = caption_image(image_path, question=prompt)
+    # убираем возможный мусор вокруг FEN
+    fen = fen.strip().split("\n")[0].strip()
+    return fen
+
+
+def get_best_chess_move(image_path: str, turn: str = "black") -> str:
+    """
+    Полный пайплайн: изображение шахматной доски → лучший ход.
+
+    1. Moondream2 извлекает FEN из картинки
+    2. python-chess проверяет корректность
+    3. Stockfish находит лучший ход
+
+    Args:
+        image_path: путь к изображению шахматной доски
+        turn:       чья очередь ходить ("black" или "white")
+
+    Returns:
+        Ход в алгебраической нотации (e.g. "Qh4#")
+    """
+    import chess
+    import chess.engine
+
+    # Шаг 1: получаем FEN
+    fen_raw = extract_fen_from_image(image_path)
+    print(f"[chess] FEN от Moondream2: {fen_raw!r}")
+
+    # Шаг 2: корректируем очерёдность хода в FEN если нужно
+    try:
+        board = chess.Board(fen_raw)
+    except Exception:
+        # FEN мог быть некорректным — пробуем починить очерёдность хода
+        parts = fen_raw.split()
+        if len(parts) >= 2:
+            parts[1] = "b" if turn == "black" else "w"
+            fen_fixed = " ".join(parts)
+        else:
+            # fallback: стартовая позиция
+            fen_fixed = chess.STARTING_FEN
+        board = chess.Board(fen_fixed)
+
+    # Принудительно выставляем нужную сторону
+    board.turn = chess.BLACK if turn == "black" else chess.WHITE
+
+    # Шаг 3: Stockfish
+    stockfish_paths = [
+        "stockfish",
+        "/usr/bin/stockfish",
+        "/usr/local/bin/stockfish",
+        "/usr/games/stockfish",
+    ]
+    engine_path = None
+    for p in stockfish_paths:
+        try:
+            subprocess.run([p, "quit"], capture_output=True, timeout=2)
+            engine_path = p
+            break
+        except Exception:
+            continue
+
+    if engine_path is None:
+        # Stockfish не найден — просим Moondream напрямую
+        prompt = (
+            f"This is a chess board. It is {turn}'s turn. "
+            "What is the best move for the current player? "
+            "Provide only the move in standard algebraic notation."
+        )
+        return caption_image(image_path, question=prompt)
+
+    with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
+        result = engine.play(board, chess.engine.Limit(time=3.0))
+        move_san = board.san(result.move)
+
+    print(f"[chess] Лучший ход: {move_san}")
+    return move_san
+
+
+# ──────────────────────────────────────────────
+# PDF: извлечение текста
+# ──────────────────────────────────────────────
+
+def read_pdf(source: str, max_chars: int = 8000) -> str:
+    """
+    Извлекает текст из PDF файла или URL.
+
+    Args:
+        source:    путь к локальному файлу или URL
+        max_chars: максимальное число символов в ответе
+
+    Returns:
+        Извлечённый текст (первые max_chars символов)
+    """
+    import pdfplumber
+    import requests as req
+
+    try:
+        if source.startswith("http"):
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = req.get(source, headers=headers, timeout=30)
+            resp.raise_for_status()
+            pdf_bytes = io.BytesIO(resp.content)
+        else:
+            pdf_bytes = open(source, "rb")
+
+        with pdfplumber.open(pdf_bytes) as pdf:
+            pages_text = []
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    pages_text.append(text)
+            full_text = "\n\n".join(pages_text)
+
+        if not source.startswith("http"):
+            pdf_bytes.close()
+
+        return full_text[:max_chars]
+
+    except Exception as e:
+        return f"Error reading PDF from {source}: {e}"
 
 
 # ──────────────────────────────────────────────
@@ -142,7 +369,6 @@ def youtube_get_metadata(url: str) -> dict:
     """
     Возвращает метаданные YouTube видео: title, description,
     duration_sec, view_count, upload_date, chapters, tags.
-    Никакого скачивания — мгновенно.
     """
     info = _ydl_info(url)
     return {
@@ -179,10 +405,8 @@ def youtube_get_subtitles(url: str, lang: str = "en") -> str:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # ищем скачанный файл субтитров
         for f in Path(tmpdir).glob("*.vtt"):
-            text = _parse_vtt(f.read_text(encoding="utf-8"))
-            return text
+            return _parse_vtt(f.read_text(encoding="utf-8"))
 
     return ""
 
@@ -194,10 +418,8 @@ def _parse_vtt(vtt_text: str) -> str:
     result = []
     for line in lines:
         line = line.strip()
-        # пропускаем таймкоды, заголовок и пустые строки
         if not line or line.startswith("WEBVTT") or "-->" in line:
             continue
-        # убираем HTML-теги
         clean = re.sub(r"<[^>]+>", "", line)
         if clean and (not result or result[-1] != clean):
             result.append(clean)
@@ -205,10 +427,7 @@ def _parse_vtt(vtt_text: str) -> str:
 
 
 def youtube_download_audio(url: str, out_dir: str | None = None) -> str:
-    """
-    Скачивает аудио из YouTube видео в mp3.
-    Возвращает путь к файлу.
-    """
+    """Скачивает аудио из YouTube в mp3. Возвращает путь к файлу."""
     import yt_dlp
 
     out_dir = out_dir or tempfile.mkdtemp()
@@ -227,26 +446,17 @@ def youtube_download_audio(url: str, out_dir: str | None = None) -> str:
         info = ydl.extract_info(url, download=True)
         video_id = info["id"]
 
-    mp3_path = os.path.join(out_dir, f"{video_id}.mp3")
-    return mp3_path
+    return os.path.join(out_dir, f"{video_id}.mp3")
 
 
 def _adaptive_frame_count(duration_sec: int) -> int:
-    """
-    Адаптивное число фреймов:
-      ≤30с  → каждые 3с  (≤10 фреймов)
-      ≤5мин → каждые 5с  (≤60 фреймов)
-      >5мин → каждые 10с (cap 100)
-    """
     if duration_sec <= 30:
         interval = 3
     elif duration_sec <= 300:
         interval = 5
     else:
         interval = 10
-
-    n = max(10, duration_sec // interval)
-    return min(100, n)
+    return min(100, max(10, duration_sec // interval))
 
 
 def youtube_extract_frames(
@@ -260,18 +470,15 @@ def youtube_extract_frames(
     Returns:
         [{"path": str, "timestamp_sec": float}, ...]
     """
-    import yt_dlp
     import cv2
+    import yt_dlp
 
     out_dir = out_dir or tempfile.mkdtemp()
 
-    # получаем длительность
     info = _ydl_info(url)
     duration = info.get("duration", 60)
-
     n_frames = max_frames or _adaptive_frame_count(duration)
 
-    # скачиваем видео
     video_path = os.path.join(out_dir, f"{info['id']}.mp4")
     ydl_opts = {
         "format": "bestvideo[ext=mp4][height<=480]+bestaudio/best[height<=480]",
@@ -283,7 +490,6 @@ def youtube_extract_frames(
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-    # извлекаем фреймы
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
@@ -308,56 +514,125 @@ def youtube_extract_frames(
     return frames
 
 
-def youtube_full_analysis(url: str, out_dir: str | None = None) -> dict:
+def youtube_audio_only(url: str, out_dir: str | None = None) -> dict:
+    """Только аудио → Whisper транскрипция."""
+    out_dir = out_dir or tempfile.mkdtemp()
+    meta = youtube_get_metadata(url)
+    audio_path = youtube_download_audio(url, out_dir)
+    transcription = transcribe_audio(audio_path)
+    return {"metadata": meta, "transcript": transcription}
+
+
+def youtube_frames_only(
+    url: str,
+    out_dir: str | None = None,
+    question: str = "Describe this image in detail.",
+) -> dict:
     """
-    Полный анализ YouTube видео:
-      1. Субтитры (если есть) — быстро
-      2. Аудио → Whisper транскрипция
-      3. Фреймы → BLIP captions
-      4. Выравнивание по таймстампам
+    Фреймы → Moondream2 ответы на вопрос.
+
+    Args:
+        url:      YouTube URL
+        out_dir:  директория для временных файлов
+        question: вопрос для Moondream2 по каждому фрейму
+    """
+    out_dir = out_dir or tempfile.mkdtemp()
+    meta = youtube_get_metadata(url)
+    frames = youtube_extract_frames(url, out_dir)
+    captions = [
+        {
+            "timestamp_sec": f["timestamp_sec"],
+            "caption": caption_image(f["path"], question=question),
+        }
+        for f in frames
+    ]
+    return {"metadata": meta, "frames": captions}
+
+
+def youtube_count_objects(
+    url: str,
+    object_name: str = "bird",
+    out_dir: str | None = None,
+) -> dict:
+    """
+    Скачивает видео, извлекает фреймы и считает объекты через YOLOv8.
+
+    Args:
+        url:         YouTube URL
+        object_name: что считать (bird, person, car, …)
+        out_dir:     директория для временных файлов
 
     Returns:
         {
-          "metadata": {...},
-          "transcript": [{"start", "end", "text"}],
-          "frames": [{"timestamp_sec", "caption"}],
-          "aligned": [{"timestamp_sec", "transcript_segment", "caption"}]
+          "max_count": int,          # максимум одновременно на одном фрейме
+          "max_timestamp_sec": float,
+          "per_frame": [{"timestamp_sec", "count"}, ...]
         }
     """
     out_dir = out_dir or tempfile.mkdtemp()
+    frames = youtube_extract_frames(url, out_dir)
+    frame_paths = [f["path"] for f in frames]
+    timestamps = {f["path"]: f["timestamp_sec"] for f in frames}
 
-    print(f"[youtube] Получаю метаданные: {url}")
+    yolo_result = count_objects_in_frames(frame_paths, object_name)
+
+    per_frame_with_ts = [
+        {
+            "timestamp_sec": timestamps.get(item["path"], 0),
+            "count": item["count"],
+        }
+        for item in yolo_result["per_frame"]
+    ]
+
+    max_ts = timestamps.get(yolo_result["max_at_frame"], 0)
+
+    return {
+        "max_count": yolo_result["max_count"],
+        "max_timestamp_sec": max_ts,
+        "per_frame": per_frame_with_ts,
+    }
+
+
+def youtube_full_analysis(url: str, out_dir: str | None = None) -> dict:
+    """
+    Полный анализ YouTube видео:
+      1. Субтитры (если есть)
+      2. Аудио → Whisper
+      3. Фреймы → Moondream2 captions
+      4. Выравнивание по таймстампам
+    """
+    out_dir = out_dir or tempfile.mkdtemp()
+
+    print(f"[youtube] Метаданные: {url}")
     meta = youtube_get_metadata(url)
     duration = meta["duration_sec"]
-    print(f"[youtube] Длительность: {duration}с, фреймов: {_adaptive_frame_count(duration)}")
+    print(f"[youtube] Длительность: {duration}с")
 
-    # субтитры
     subtitles_text = ""
     if meta["subtitles_available"] or meta["automatic_captions_available"]:
-        print("[youtube] Пробую субтитры…")
+        print("[youtube] Загружаю субтитры…")
         subtitles_text = youtube_get_subtitles(url)
 
-    # аудио → транскрипция
     print("[youtube] Скачиваю аудио…")
     audio_path = youtube_download_audio(url, out_dir)
     print("[youtube] Транскрибирую…")
-    transcription = transcribe_audio(audio_path, word_timestamps=False)
+    transcription = transcribe_audio(audio_path)
 
-    # фреймы → captions
-    print("[youtube] Скачиваю видео и извлекаю фреймы…")
+    print("[youtube] Извлекаю фреймы…")
     frames = youtube_extract_frames(url, out_dir)
-    print(f"[youtube] Генерирую captions для {len(frames)} фреймов…")
-    frame_captions = []
-    for f in frames:
-        cap = caption_image(f["path"])
-        frame_captions.append({"timestamp_sec": f["timestamp_sec"], "caption": cap})
+    print(f"[youtube] Генерирую описания для {len(frames)} фреймов…")
+    frame_captions = [
+        {
+            "timestamp_sec": f["timestamp_sec"],
+            "caption": caption_image(f["path"]),
+        }
+        for f in frames
+    ]
 
-    # выравнивание: для каждого фрейма находим ближайший сегмент транскрипции
-    aligned = []
     segments = transcription["segments"]
+    aligned = []
     for fc in frame_captions:
         t = fc["timestamp_sec"]
-        # ближайший сегмент
         nearest = min(
             segments,
             key=lambda s: abs((s["start"] + s["end"]) / 2 - t),
@@ -376,24 +651,3 @@ def youtube_full_analysis(url: str, out_dir: str | None = None) -> dict:
         "frames": frame_captions,
         "aligned": aligned,
     }
-
-
-def youtube_audio_only(url: str, out_dir: str | None = None) -> dict:
-    """Только аудио → Whisper транскрипция."""
-    out_dir = out_dir or tempfile.mkdtemp()
-    meta = youtube_get_metadata(url)
-    audio_path = youtube_download_audio(url, out_dir)
-    transcription = transcribe_audio(audio_path)
-    return {"metadata": meta, "transcript": transcription}
-
-
-def youtube_frames_only(url: str, out_dir: str | None = None) -> dict:
-    """Только фреймы → BLIP captions."""
-    out_dir = out_dir or tempfile.mkdtemp()
-    meta = youtube_get_metadata(url)
-    frames = youtube_extract_frames(url, out_dir)
-    captions = [
-        {"timestamp_sec": f["timestamp_sec"], "caption": caption_image(f["path"])}
-        for f in frames
-    ]
-    return {"metadata": meta, "frames": captions}

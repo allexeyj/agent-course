@@ -40,33 +40,94 @@ ANSWER FORMAT RULES (read carefully)
   decode it first, then answer normally.
 
 ═══════════════════════════════════════════
-TOOL USAGE STRATEGY
+TOOL SELECTION STRATEGY
 ═══════════════════════════════════════════
-1. Read the question and any attached file carefully.
-2. If a file is attached:
-   - .png/.jpg/.jpeg → use describe_image
-   - .mp3/.wav/.m4a  → use transcribe_audio_file
-   - .py             → use read_python_file, then execute_python
-   - .xlsx/.csv      → use read_excel
-3. If the question contains a YouTube URL:
-   - ALWAYS start with youtube_info (free, no download)
-   - If subtitles answer the question → done
-   - If question is about speech/narration → youtube_transcribe
-   - If question is about visuals/counting → youtube_describe_frames
-   - If both needed → youtube_full
-4. For factual questions → web_search, then visit_url for full content.
-5. For Wikipedia questions → web_search with "site:en.wikipedia.org".
-6. Think step by step before answering.
-   For multi-hop questions, resolve each dependency in order.
+
+── ATTACHED FILES ──────────────────────────
+• .png / .jpg / .jpeg (generic image) → describe_image
+• .png / .jpg with a CHESS BOARD      → chess_move  ← NOT describe_image
+• .mp3 / .wav / .m4a                  → transcribe_audio_file
+• .py                                 → read_python_file first, then decide:
+      - has while True / time.sleep / random → analyze_python_logic
+      - simple deterministic code           → execute_python
+• .xlsx / .csv                        → read_excel
+• .pdf                                → read_pdf_url
+
+── CHESS POSITIONS ─────────────────────────
+ALWAYS use chess_move for chess board images.
+Never use describe_image for chess — it will not find the best move.
+Provide the turn ("black" or "white") from the question.
+
+── YOUTUBE VIDEOS ──────────────────────────
+Decision tree (follow in order):
+  1. ALWAYS start with youtube_info — get metadata + subtitles for free.
+  2. If subtitles answer the question → done, no download needed.
+  3. Question about SPEECH / DIALOGUE / NARRATION → youtube_transcribe
+  4. Question about COUNTING OBJECTS simultaneously (birds, people, cars…)
+       → youtube_count_objects(url, object_name="bird")
+       This uses YOLOv8 — much more accurate than frame descriptions for counting.
+  5. Question about VISUALS (describe scene, read text on screen, identify objects)
+       → youtube_describe_frames(url, question="specific question about each frame")
+       Always pass a specific question, not the generic default.
+  6. Question needs BOTH speech AND visuals → youtube_full
+
+── FACTUAL / RESEARCH QUESTIONS ────────────
+  1. web_search with a precise query.
+  2. If result is a web page → visit_url to read full content.
+  3. If result is a PDF (scientific paper, report) → read_pdf_url.
+  4. For Wikipedia → web_search with "site:en.wikipedia.org <topic>".
+  5. Multi-hop questions: resolve each dependency step by step.
+     Example: "Who played X in film Y → what role did they play in Z"
+       Step 1: search who played X in Y
+       Step 2: search that actor's role in Z
+
+── PYTHON FILES ────────────────────────────
+  1. Always read_python_file first to see the code.
+  2. Check for: while True, time.sleep(), random, recursion.
+  3. If any found → use analyze_python_logic (static reasoning, no execution).
+  4. If clean/deterministic → use execute_python.
+  5. IMPORTANT: a function that only returns one possible value
+     (e.g. returns X only when condition Y is true, and Y implies X==0)
+     can be answered by pure reasoning without running the code.
+
+── PDF DOCUMENTS ───────────────────────────
+  • Always use read_pdf_url (not visit_url) for direct PDF links.
+  • For scientific papers: look in Acknowledgements / Funding sections
+    for award numbers, grant IDs, NASA/NSF codes.
+  • visit_url auto-redirects PDF content-type to read_pdf_url anyway.
+
+═══════════════════════════════════════════
+TOOL QUICK REFERENCE
+═══════════════════════════════════════════
+  web_search            — search the web (Tavily)
+  visit_url             — fetch full page text (auto-handles PDFs)
+  read_pdf_url          — extract text from PDF file or URL
+  describe_image        — ask any question about an image (Moondream2)
+  chess_move            — chess board image → best move via Stockfish
+  transcribe_audio_file — audio file → text (Whisper)
+  youtube_info          — metadata + subtitles, no download (START HERE)
+  youtube_transcribe    — audio → Whisper transcript
+  youtube_describe_frames — frames → Moondream2 visual descriptions
+  youtube_count_objects — frames → YOLOv8 object count (max simultaneous)
+  youtube_full          — full audio+visual analysis (slow, last resort)
+  analyze_python_logic  — static AST analysis for tricky Python code
+  read_python_file      — read .py file source
+  execute_python        — run deterministic Python code
+  read_excel            — read .xlsx or .csv as table
 
 ═══════════════════════════════════════════
 COMMON MISTAKES TO AVOID
 ═══════════════════════════════════════════
 - Do NOT write "The answer is ...", "Final answer:", or any wrapper.
 - Do NOT include units unless the question asks for them.
-- Do NOT guess — if unsure, search again.
+- Do NOT guess — if unsure, search again with a different query.
 - Do NOT add trailing punctuation.
+- Do NOT use describe_image for chess boards — use chess_move.
+- Do NOT use execute_python if the code has while True or time.sleep.
+- Do NOT use visit_url for PDF links — use read_pdf_url.
 - Reversed/encoded text: decode first, then answer.
+- Botanical fruits (tomato, pepper, corn, zucchini, cucumber, avocado,
+  pumpkin, eggplant, okra, green beans, peas, nuts) are NOT vegetables.
 
 Reasoning: high
 """).strip()
@@ -120,7 +181,6 @@ class GAIAAgent:
         Returns:
             Строка-ответ для сабмита.
         """
-        # формируем сообщение пользователя
         user_content = question
         if file_path and Path(file_path).exists():
             user_content += f"\n\nAttached file: {file_path}"
@@ -152,7 +212,10 @@ class GAIAAgent:
                     print(f"  💬 {msg.content[:200]}")
             elif kind == "ToolMessage":
                 preview = str(msg.content)[:300]
-                print(f"  📥 [{msg.name}] {preview}{'…' if len(str(msg.content)) > 300 else ''}")
+                print(
+                    f"  📥 [{msg.name}] {preview}"
+                    f"{'…' if len(str(msg.content)) > 300 else ''}"
+                )
         print()
 
 
