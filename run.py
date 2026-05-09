@@ -18,8 +18,8 @@ from agent import GAIAAgent
 # ──────────────────────────────────────────────
 
 API_BASE        = "https://agents-course-unit4-scoring.hf.space"
-DATASET_PATH    = "gaia_dataset.json"        # скачан заранее
-ANSWERS_PATH    = "answers.json"             # сохраняем ответы между запусками
+DATASET_PATH    = "gaia_dataset.json"
+ANSWERS_PATH    = "answers.json"
 
 HF_USERNAME     = os.environ.get("HF_USERNAME", "your_username")
 HF_SPACE_URL    = os.environ.get(
@@ -27,8 +27,8 @@ HF_SPACE_URL    = os.environ.get(
     "https://huggingface.co/spaces/your_username/your_space/tree/main",
 )
 
-VERBOSE         = True    # печатать вызовы инструментов
-TIMEOUT_SEC     = 280     # ~4.7 мин на вопрос (лимит 5 мин)
+VERBOSE         = True
+TIMEOUT_SEC     = 280
 
 
 # ──────────────────────────────────────────────
@@ -45,7 +45,6 @@ def load_dataset() -> list[dict]:
 # ──────────────────────────────────────────────
 
 def load_answers() -> dict[str, str]:
-    """Загружает уже вычисленные ответы (для докачки после падения)."""
     if Path(ANSWERS_PATH).exists():
         with open(ANSWERS_PATH, encoding="utf-8") as f:
             return json.load(f)
@@ -62,11 +61,6 @@ def save_answers(answers: dict[str, str]) -> None:
 # ──────────────────────────────────────────────
 
 def run_agent(dataset: list[dict], agent: GAIAAgent) -> dict[str, str]:
-    """
-    Прогоняет агента по всем вопросам.
-    Пропускает уже вычисленные (из answers.json).
-    Сохраняет ответ после каждого вопроса.
-    """
     answers = load_answers()
     skipped = sum(1 for q in dataset if q["task_id"] in answers)
     if skipped:
@@ -75,8 +69,8 @@ def run_agent(dataset: list[dict], agent: GAIAAgent) -> dict[str, str]:
     total = len(dataset)
 
     for i, item in enumerate(dataset, 1):
-        task_id  = item["task_id"]
-        question = item["question"]
+        task_id   = item["task_id"]
+        question  = item["question"]
         file_path = item.get("file_path")
 
         if task_id in answers:
@@ -94,6 +88,7 @@ def run_agent(dataset: list[dict], agent: GAIAAgent) -> dict[str, str]:
             answer = agent.solve(
                 question=question,
                 file_path=file_path,
+                task_id=task_id,      # передаём task_id для изоляции памяти
                 verbose=VERBOSE,
             )
         except Exception as e:
@@ -132,7 +127,6 @@ def submit(answers: dict[str, str]) -> dict:
 # ──────────────────────────────────────────────
 
 def main() -> None:
-    # проверяем env vars
     missing = []
     if not os.environ.get("OPENROUTER_API_KEY"):
         missing.append("OPENROUTER_API_KEY")
@@ -146,10 +140,8 @@ def main() -> None:
 
     agent = GAIAAgent()
 
-    # 1. Прогоняем агента
     answers = run_agent(dataset, agent)
 
-    # 2. Сабмитим
     print("=" * 60)
     print("📤 Отправляю ответы…")
     try:

@@ -4,6 +4,7 @@ agent.py — GAIA ReAct агент
 
 from __future__ import annotations
 
+import hashlib
 import os
 import textwrap
 from pathlib import Path
@@ -168,6 +169,7 @@ class GAIAAgent:
         self,
         question: str,
         file_path: str | None = None,
+        task_id: str | None = None,
         verbose: bool = False,
     ) -> str:
         """
@@ -176,6 +178,7 @@ class GAIAAgent:
         Args:
             question:  текст вопроса
             file_path: путь к вложению (опционально)
+            task_id:   идентификатор задачи (для изоляции памяти между вопросами)
             verbose:   печатать вызовы инструментов
 
         Returns:
@@ -185,7 +188,15 @@ class GAIAAgent:
         if file_path and Path(file_path).exists():
             user_content += f"\n\nAttached file: {file_path}"
 
-        config = {"configurable": {"thread_id": "gaia-single"}}
+        # Уникальный thread_id на каждый вопрос.
+        # Критично: без этого MemorySaver тащит контекст всех предыдущих вопросов,
+        # агент переигрывает старые tool calls и мешает ответы друг с другом.
+        if task_id:
+            thread_id = f"gaia-{task_id}"
+        else:
+            thread_id = f"gaia-{hashlib.md5(question.encode()).hexdigest()[:12]}"
+
+        config = {"configurable": {"thread_id": thread_id}}
 
         result = self._agent.invoke(
             {"messages": [HumanMessage(content=user_content)]},
@@ -196,7 +207,43 @@ class GAIAAgent:
             self._print_trace(result["messages"])
 
         answer: str = result["messages"][-1].content
-        return answer.strip()
+        answer = self._clean_answer(answer)
+        return answer
+
+    @staticmethod
+    def _clean_answer(answer: str) -> str:
+        """
+        Постобработка ответа модели:
+          - убирает пробелы по краям
+          - удаляет обёртки типа "The answer is X"
+          - исправляет задвоения типа "FunkMonkFunkMonk" → "FunkMonk"
+          - убирает trailing punctuation
+        """
+        answer = answer.strip()
+
+        # Удаляем явные обёртки с reasoning
+        for prefix in (
+            "The answer is ",
+            "Final answer: ",
+            "Answer: ",
+            "FINAL ANSWER: ",
+            "final answer: ",
+        ):
+            if answer.lower().startswith(prefix.lower()):
+                answer = answer[len(prefix):].strip()
+                break
+
+        # Исправляем задвоения без пробела: "FunkMonkFunkMonk" → "FunkMonk"
+        n = len(answer)
+        if n >= 4 and n % 2 == 0:
+            half = n // 2
+            if answer[:half] == answer[half:]:
+                answer = answer[:half]
+
+        # Trailing punctuation
+        answer = answer.rstrip(".,;:")
+
+        return answer
 
     @staticmethod
     def _print_trace(messages: list) -> None:

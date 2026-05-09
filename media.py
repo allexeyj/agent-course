@@ -1,11 +1,11 @@
 """
 media.py — локальные медиа-инструменты для GAIA агента
-  - Whisper    : аудио → текст
-  - Moondream2 : картинка → ответ на произвольный вопрос (замена BLIP)
-  - YOLOv8     : детекция и подсчёт объектов на фреймах
-  - Stockfish  : анализ шахматных позиций (FEN → лучший ход)
-  - pdfplumber : извлечение текста из PDF (файл или URL)
-  - yt-dlp     : YouTube → аудио / фреймы / оба
+  - Whisper large-v3 : аудио → текст
+  - Moondream2       : картинка → ответ на произвольный вопрос
+  - YOLOv8x          : детекция и подсчёт объектов на фреймах
+  - Stockfish        : анализ шахматных позиций (FEN → лучший ход)
+  - pdfplumber       : извлечение текста из PDF (файл или URL)
+  - yt-dlp           : YouTube → аудио / фреймы / оба
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Literal
 
 # ──────────────────────────────────────────────
 # Ленивая загрузка моделей
@@ -28,7 +27,7 @@ _moondream_tokenizer = None
 _yolo_model = None
 
 
-def _get_whisper(model_size: str = "base"):
+def _get_whisper(model_size: str = "large-v3"):
     global _whisper_model
     if _whisper_model is None:
         import whisper
@@ -40,7 +39,7 @@ def _get_whisper(model_size: str = "base"):
 def _get_moondream():
     """
     Загружает Moondream2 (~2GB VRAM).
-    Принимает произвольный вопрос об изображении — намного мощнее BLIP.
+    Принимает произвольный вопрос об изображении.
     """
     global _moondream_model, _moondream_tokenizer
     if _moondream_model is None:
@@ -66,12 +65,12 @@ def _get_moondream():
 
 
 def _get_yolo():
-    """Загружает YOLOv8 nano (~6MB). Для детекции и подсчёта объектов."""
+    """Загружает YOLOv8x — самая точная версия для детекции объектов."""
     global _yolo_model
     if _yolo_model is None:
         from ultralytics import YOLO
-        print("[media] Загружаю YOLOv8n…")
-        _yolo_model = YOLO("yolov8n.pt")
+        print("[media] Загружаю YOLOv8x…")
+        _yolo_model = YOLO("yolov8x.pt")
     return _yolo_model
 
 
@@ -81,7 +80,7 @@ def _get_yolo():
 
 def transcribe_audio(audio_path: str, word_timestamps: bool = False) -> dict:
     """
-    Транскрибирует аудиофайл с помощью Whisper.
+    Транскрибирует аудиофайл с помощью Whisper large-v3.
 
     Returns:
         {
@@ -109,7 +108,6 @@ def transcribe_audio(audio_path: str, word_timestamps: bool = False) -> dict:
 def caption_image(image_path: str, question: str = "Describe this image in detail.") -> str:
     """
     Отвечает на произвольный вопрос об изображении через Moondream2.
-    Принимает путь к файлу или URL.
 
     Args:
         image_path: путь к файлу или URL
@@ -147,7 +145,7 @@ def caption_image_base64(b64_str: str, question: str = "Describe this image in d
 # YOLO: подсчёт объектов на фреймах
 # ──────────────────────────────────────────────
 
-# COCO class ids для часто нужных объектов
+# COCO class ids
 COCO_CLASSES = {
     "bird": 14,
     "cat": 15,
@@ -167,26 +165,17 @@ def count_objects_in_frames(
     object_name: str = "bird",
 ) -> dict:
     """
-    Считает объекты заданного класса на каждом фрейме.
-    Возвращает максимум и детали по каждому фрейму.
-
-    Args:
-        frame_paths: список путей к фреймам
-        object_name: название объекта (bird, person, car, etc.)
+    Считает объекты заданного класса на каждом фрейме через YOLOv8x.
 
     Returns:
         {
           "max_count": int,
-          "max_at_frame": str,       # путь к фрейму с максимумом
-          "per_frame": [{"path", "count", "timestamp_sec"}, ...]
+          "max_at_frame": str,
+          "per_frame": [{"path", "count"}, ...]
         }
     """
     model = _get_yolo()
-
     class_id = COCO_CLASSES.get(object_name.lower())
-    if class_id is None:
-        # если класс не в словаре — ищем по имени в именах COCO
-        class_id = None  # YOLO сам разберётся через names
 
     per_frame = []
     max_count = 0
@@ -196,12 +185,7 @@ def count_objects_in_frames(
         if class_id is not None:
             results = model(path, classes=[class_id], verbose=False)
         else:
-            # запустим всё и отфильтруем по имени
             results = model(path, verbose=False)
-            results[0].boxes = [
-                b for b in results[0].boxes
-                if model.names[int(b.cls)].lower() == object_name.lower()
-            ]
 
         count = len(results[0].boxes)
         per_frame.append({"path": path, "count": count})
@@ -222,19 +206,14 @@ def count_objects_in_frames(
 # ──────────────────────────────────────────────
 
 def extract_fen_from_image(image_path: str) -> str:
-    """
-    Извлекает FEN нотацию шахматной позиции из изображения
-    через Moondream2.
-    """
+    """Извлекает FEN нотацию шахматной позиции из изображения через Moondream2."""
     prompt = (
         "This is a chess board. "
         "Please read the position carefully and provide the FEN notation "
         "of this position. Output ONLY the FEN string, nothing else."
     )
     fen = caption_image(image_path, question=prompt)
-    # убираем возможный мусор вокруг FEN
-    fen = fen.strip().split("\n")[0].strip()
-    return fen
+    return fen.strip().split("\n")[0].strip()
 
 
 def get_best_chess_move(image_path: str, turn: str = "black") -> str:
@@ -255,28 +234,22 @@ def get_best_chess_move(image_path: str, turn: str = "black") -> str:
     import chess
     import chess.engine
 
-    # Шаг 1: получаем FEN
     fen_raw = extract_fen_from_image(image_path)
     print(f"[chess] FEN от Moondream2: {fen_raw!r}")
 
-    # Шаг 2: корректируем очерёдность хода в FEN если нужно
     try:
         board = chess.Board(fen_raw)
     except Exception:
-        # FEN мог быть некорректным — пробуем починить очерёдность хода
         parts = fen_raw.split()
         if len(parts) >= 2:
             parts[1] = "b" if turn == "black" else "w"
             fen_fixed = " ".join(parts)
         else:
-            # fallback: стартовая позиция
             fen_fixed = chess.STARTING_FEN
         board = chess.Board(fen_fixed)
 
-    # Принудительно выставляем нужную сторону
     board.turn = chess.BLACK if turn == "black" else chess.WHITE
 
-    # Шаг 3: Stockfish
     stockfish_paths = [
         "stockfish",
         "/usr/bin/stockfish",
@@ -293,7 +266,6 @@ def get_best_chess_move(image_path: str, turn: str = "black") -> str:
             continue
 
     if engine_path is None:
-        # Stockfish не найден — просим Moondream напрямую
         prompt = (
             f"This is a chess board. It is {turn}'s turn. "
             "What is the best move for the current player? "
@@ -320,9 +292,6 @@ def read_pdf(source: str, max_chars: int = 8000) -> str:
     Args:
         source:    путь к локальному файлу или URL
         max_chars: максимальное число символов в ответе
-
-    Returns:
-        Извлечённый текст (первые max_chars символов)
     """
     import pdfplumber
     import requests as req
@@ -366,10 +335,6 @@ def _ydl_info(url: str) -> dict:
 
 
 def youtube_get_metadata(url: str) -> dict:
-    """
-    Возвращает метаданные YouTube видео: title, description,
-    duration_sec, view_count, upload_date, chapters, tags.
-    """
     info = _ydl_info(url)
     return {
         "title": info.get("title", ""),
@@ -385,10 +350,6 @@ def youtube_get_metadata(url: str) -> dict:
 
 
 def youtube_get_subtitles(url: str, lang: str = "en") -> str:
-    """
-    Пытается скачать субтитры (авто или ручные).
-    Возвращает текст субтитров или пустую строку.
-    """
     import yt_dlp
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -412,7 +373,6 @@ def youtube_get_subtitles(url: str, lang: str = "en") -> str:
 
 
 def _parse_vtt(vtt_text: str) -> str:
-    """Извлекает только текст из VTT субтитров."""
     import re
     lines = vtt_text.splitlines()
     result = []
@@ -427,7 +387,6 @@ def _parse_vtt(vtt_text: str) -> str:
 
 
 def youtube_download_audio(url: str, out_dir: str | None = None) -> str:
-    """Скачивает аудио из YouTube в mp3. Возвращает путь к файлу."""
     import yt_dlp
 
     out_dir = out_dir or tempfile.mkdtemp()
@@ -439,7 +398,7 @@ def youtube_download_audio(url: str, out_dir: str | None = None) -> str:
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
-            "preferredquality": "128",
+            "preferredquality": "192",
         }],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -464,12 +423,6 @@ def youtube_extract_frames(
     out_dir: str | None = None,
     max_frames: int | None = None,
 ) -> list[dict]:
-    """
-    Скачивает видео и извлекает фреймы равномерно.
-
-    Returns:
-        [{"path": str, "timestamp_sec": float}, ...]
-    """
     import cv2
     import yt_dlp
 
@@ -515,7 +468,6 @@ def youtube_extract_frames(
 
 
 def youtube_audio_only(url: str, out_dir: str | None = None) -> dict:
-    """Только аудио → Whisper транскрипция."""
     out_dir = out_dir or tempfile.mkdtemp()
     meta = youtube_get_metadata(url)
     audio_path = youtube_download_audio(url, out_dir)
@@ -528,14 +480,6 @@ def youtube_frames_only(
     out_dir: str | None = None,
     question: str = "Describe this image in detail.",
 ) -> dict:
-    """
-    Фреймы → Moondream2 ответы на вопрос.
-
-    Args:
-        url:      YouTube URL
-        out_dir:  директория для временных файлов
-        question: вопрос для Moondream2 по каждому фрейму
-    """
     out_dir = out_dir or tempfile.mkdtemp()
     meta = youtube_get_metadata(url)
     frames = youtube_extract_frames(url, out_dir)
@@ -554,21 +498,6 @@ def youtube_count_objects(
     object_name: str = "bird",
     out_dir: str | None = None,
 ) -> dict:
-    """
-    Скачивает видео, извлекает фреймы и считает объекты через YOLOv8.
-
-    Args:
-        url:         YouTube URL
-        object_name: что считать (bird, person, car, …)
-        out_dir:     директория для временных файлов
-
-    Returns:
-        {
-          "max_count": int,          # максимум одновременно на одном фрейме
-          "max_timestamp_sec": float,
-          "per_frame": [{"timestamp_sec", "count"}, ...]
-        }
-    """
     out_dir = out_dir or tempfile.mkdtemp()
     frames = youtube_extract_frames(url, out_dir)
     frame_paths = [f["path"] for f in frames]
@@ -594,13 +523,6 @@ def youtube_count_objects(
 
 
 def youtube_full_analysis(url: str, out_dir: str | None = None) -> dict:
-    """
-    Полный анализ YouTube видео:
-      1. Субтитры (если есть)
-      2. Аудио → Whisper
-      3. Фреймы → Moondream2 captions
-      4. Выравнивание по таймстампам
-    """
     out_dir = out_dir or tempfile.mkdtemp()
 
     print(f"[youtube] Метаданные: {url}")
