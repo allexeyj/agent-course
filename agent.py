@@ -138,7 +138,7 @@ Reasoning: high
 # LLM
 # ──────────────────────────────────────────────
 
-def build_llm(model_id: str = "openai/gpt-oss-120b:free") -> ChatOpenAI:
+def build_llm(model_id: str = "inclusionai/ring-2.6-1t:free") -> ChatOpenAI:
     return ChatOpenAI(
         model=model_id,
         api_key=os.environ["OPENROUTER_API_KEY"],
@@ -153,7 +153,7 @@ def build_llm(model_id: str = "openai/gpt-oss-120b:free") -> ChatOpenAI:
 # ──────────────────────────────────────────────
 
 class GAIAAgent:
-    def __init__(self, model_id: str = "openai/gpt-oss-120b:free") -> None:
+    def __init__(self, model_id: str = "inclusionai/ring-2.6-1t:free") -> None:
         tools = build_all_tools()
         llm = build_llm(model_id)
 
