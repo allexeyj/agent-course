@@ -30,6 +30,13 @@ HF_SPACE_URL    = os.environ.get(
 VERBOSE         = True
 TIMEOUT_SEC     = 280
 
+# Вопросы которые пропускаем (YouTube заблокирован в Colab).
+# Убери task_id из этого списка когда решишь проблему с cookies.
+SKIP_TASK_IDS = {
+    "a1e91b78-d3d8-4675-bb8d-62741b4b68a6",   # Q2  — YouTube bird species
+    "9d191bce-651d-4746-be2d-7ef8ecadb9c2",   # Q7  — YouTube Teal'c
+}
+
 
 # ──────────────────────────────────────────────
 # ЗАГРУЗКА ДАТАСЕТА
@@ -62,9 +69,13 @@ def save_answers(answers: dict[str, str]) -> None:
 
 def run_agent(dataset: list[dict], agent: GAIAAgent) -> dict[str, str]:
     answers = load_answers()
-    skipped = sum(1 for q in dataset if q["task_id"] in answers)
-    if skipped:
-        print(f"↩️  Пропускаю {skipped} уже решённых вопросов\n")
+
+    already_done  = sum(1 for q in dataset if q["task_id"] in answers)
+    skipped_count = sum(1 for q in dataset if q["task_id"] in SKIP_TASK_IDS)
+    if already_done:
+        print(f"↩️  Пропускаю {already_done} уже решённых вопросов")
+    if skipped_count:
+        print(f"⏭️  Пропускаю {skipped_count} вопросов из SKIP_TASK_IDS\n")
 
     total = len(dataset)
 
@@ -73,7 +84,13 @@ def run_agent(dataset: list[dict], agent: GAIAAgent) -> dict[str, str]:
         question  = item["question"]
         file_path = item.get("file_path")
 
+        # Пропускаем уже решённые
         if task_id in answers:
+            continue
+
+        # Пропускаем YouTube-вопросы пока не решена проблема с cookies
+        if task_id in SKIP_TASK_IDS:
+            print(f"⏭️  [{i}/{total}] SKIP {task_id[:8]}… (YouTube, решим позже)")
             continue
 
         print(f"{'─'*60}")
@@ -88,7 +105,7 @@ def run_agent(dataset: list[dict], agent: GAIAAgent) -> dict[str, str]:
             answer = agent.solve(
                 question=question,
                 file_path=file_path,
-                task_id=task_id,      # передаём task_id для изоляции памяти
+                task_id=task_id,
                 verbose=VERBOSE,
             )
         except Exception as e:

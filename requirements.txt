@@ -12,7 +12,7 @@ langgraph>=0.1.0
 tavily-python>=0.3.0
 
 # ── Transformers / ML ────────────────────────
-transformers>=4.40.0
+transformers==4.56.1
 accelerate>=0.27.0
 einops>=0.7.0          # нужен Moondream2
 timm>=0.9.0            # нужен Moondream2
