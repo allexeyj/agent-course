@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────
+# GAIA Agent — Python dependencies
+# Python 3.10+
+# PyTorch устанавливается отдельно (см. INSTALL.md)
+# ─────────────────────────────────────────────
+
+# ── LangChain / LangGraph ────────────────────
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-openai>=0.1.0
+langgraph>=0.1.0
+tavily-python>=0.3.0
+
+# ── Transformers / ML ────────────────────────
+transformers>=4.40.0
+accelerate>=0.27.0
+einops>=0.7.0          # нужен Moondream2
+timm>=0.9.0            # нужен Moondream2
+
+# ── Whisper ──────────────────────────────────
+openai-whisper>=20231117
+
+# ── YOLOv8 ───────────────────────────────────
+ultralytics>=8.1.0
+
+# ── Компьютерное зрение ──────────────────────
+Pillow>=10.0.0
+opencv-python>=4.9.0
+
+# ── YouTube ──────────────────────────────────
+yt-dlp>=2024.1.0
+
+# ── PDF ──────────────────────────────────────
+pdfplumber>=0.10.0
+pypdf>=4.0.0           # fallback для повреждённых PDF
+
+# ── Шахматы ──────────────────────────────────
+python-chess>=1.10.0
+
+# ── Данные / таблицы ─────────────────────────
+pandas>=2.0.0
+openpyxl>=3.1.0        # чтение .xlsx
+tabulate>=0.9.0        # pandas .to_markdown()
+
+# ── Веб ──────────────────────────────────────
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0            # быстрый HTML парсер для BS4
